@@ -29,6 +29,13 @@ jobs:
           override: true
       - name: Publish
         uses: katyo/publish-crates@v2
+        id: publish-crates
         with:
           registry_token: ${{ secrets.CRATES_IO_PUBLISH }}
+          ignore-unpublished-changes: true
           dry_run: ${{ github.event_name != 'push' }}
+      - name: if RPM published
+        if: fromJSON(steps.publish-crates.outputs.published).*
+        run: |
+          LIST="${{ join(fromJSON(steps.publish-crates.outputs.published).*.name, ', ') }}"
+          echo "Published crates: $LIST"
