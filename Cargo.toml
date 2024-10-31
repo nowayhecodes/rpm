@@ -1,0 +1,26 @@
+[package]
+name = "rpm"
+version = "0.1.0"
+edition = "2021"
+authors = ["Gus Cavalcante <nowayhecodes@gmail.com>"]
+description = "A fast, secure Node.js package manager written in Rust"
+
+[dependencies]
+tokio = { version = "1.36", features = ["full"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+semver = "1.0"
+sha2 = "0.10"
+thiserror = "1.0"
+anyhow = "1.0"
+async-trait = "0.1"
+url = "2.5"
+tempfile = "3.10"
+tar = "0.4"
+flate2 = "1.0"
+log = "0.4"
+env_logger = "0.11"
+futures = "0.3"
+tokio-util = "0.7"
