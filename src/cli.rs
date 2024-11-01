@@ -18,7 +18,7 @@ enum Commands {
         #[arg(required = true)]
         packages: Vec<String>,
 
-        #[arg(short, long)]
+        #[arg(short, long, required = false)]
         global: bool,
     },
 
@@ -26,7 +26,7 @@ enum Commands {
         #[arg(required = true)]
         packages: Vec<String>,
 
-        #[arg(short, long)]
+        #[arg(short, long, required = false)]
         global: bool,
     },
 }
@@ -50,7 +50,7 @@ impl Cli {
                     if package_path.exists() {
                         fs::remove_dir_all(&package_path).await?;
                         println!("Successfully removed package: {}", package);
-                        
+
                         // Update package.json if it exists and we're in local mode
                         if !global {
                             if let Ok(mut package_json) = PackageJson::load().await {
