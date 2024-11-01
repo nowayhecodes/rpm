@@ -21,21 +21,22 @@ jobs:
     steps:
       - name: Checkout Sources
         uses: actions/checkout@v4
+
       - name: Install toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           profile: minimal
           override: true
-      - name: Publish
-        uses: katyo/publish-crates@v2
-        id: publish-crates
-        with:
-          registry_token: ${{ secrets.CRATES_IO_PUBLISH }}
-          ignore-unpublished-changes: true
-          dry_run: ${{ github.event_name != 'push' }}
+
+      - name: Publish Crate
+        id: publish-crate
+        run: cargo publish --token ${CRATES_TOKEN}
+        env:
+          CRATES_TOKEN: ${{ secrets.CRATES_IO_PUBLISH }}
+
       - name: if RPM published
-        if: fromJSON(steps.publish-crates.outputs.published).*
+        if: fromJSON(steps.publish-crate.outputs.published).*
         run: |
-          LIST="${{ join(fromJSON(steps.publish-crates.outputs.published).*.name, ', ') }}"
-          echo "Published crates: $LIST"
+          LIST="${{ join(fromJSON(steps.publish-crate.outputs.published).*.name, ', ') }}"
+          echo "Published crate: $LIST"
