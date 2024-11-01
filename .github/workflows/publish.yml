@@ -1,42 +1,34 @@
-name: Publish
+name: Publish to Cargo
 
 on:
-  #   push:
-  #     branches: ["main"]
-  #     tags: ["v*.*.*"]
-  workflow_dispatch:
-    inputs:
-      tag:
-        type: string
-        description: The tag to publish
-        required: true
-
-env:
-  CARGO_TERM_COLOR: always
+  push:
+    branches: [release]
 
 jobs:
   publish:
-    name: Publish
     runs-on: ubuntu-latest
+
+    name: "publish"
+
     steps:
-      - name: Checkout Sources
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-
-      - name: Publish Crate
-        id: publish-crate
-        run: cargo publish --token ${CRATES_TOKEN}
+      - name: Cache publish-action bin
+        id: cache-publish-action
+        uses: actions/cache@v4
         env:
-          CRATES_TOKEN: ${{ secrets.CRATES_IO_PUBLISH }}
+          cache-name: cache-publish-action
+        with:
+          path: ~/.cargo
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-v0.4.0
 
-      - name: if RPM published
-        if: fromJSON(steps.publish-crate.outputs.published).*
-        run: |
-          LIST="${{ join(fromJSON(steps.publish-crate.outputs.published).*.name, ', ') }}"
-          echo "Published crate: $LIST"
+      - name: Install publish-action
+        if: steps.cache-publish-action.outputs.cache-hit != 'true'
+        run: cargo install publish-action --version=0.4.0
+
+      - name: Run publish-action
+        id: publish-action
+        run: publish-action
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_PUBLISH }}
