@@ -1,6 +1,9 @@
 use crate::install::PackageInstaller;
+use crate::package::PackageJson;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+use tokio::fs;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -36,8 +39,29 @@ impl Cli {
                 installer.install_packages(&packages).await?;
             }
             Commands::Remove { packages, global } => {
-                // TODO: Implement package removal
-                println!("Removing packages: {:?}, global: {}", packages, global);
+                let base_path = if global {
+                    PathBuf::from("/usr/local/lib/node_modules")
+                } else {
+                    PathBuf::from("node_modules")
+                };
+
+                for package in packages {
+                    let package_path = base_path.join(&package);
+                    if package_path.exists() {
+                        fs::remove_dir_all(&package_path).await?;
+                        println!("Successfully removed package: {}", package);
+                        
+                        // Update package.json if it exists and we're in local mode
+                        if !global {
+                            if let Ok(mut package_json) = PackageJson::load().await {
+                                package_json.remove_dependency(&package);
+                                package_json.save().await?;
+                            }
+                        }
+                    } else {
+                        println!("Package not found: {}", package);
+                    }
+                }
             }
         }
         Ok(())
