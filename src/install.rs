@@ -1,11 +1,10 @@
 use crate::error::InstallError;
 use crate::package::Package;
 use crate::registry::RegistryClient;
-use crate::verification::verify_package;
+use crate::verification::{ChecksumIntegrityChecker, Verification};
 use anyhow::Result;
 use flate2::read::GzDecoder;
 use reqwest::Client;
-use std::io::Read;
 use std::path::PathBuf;
 use tar::Archive;
 use tokio::fs;
@@ -49,7 +48,7 @@ impl PackageInstaller {
 
         let package_data = self.download_package(&package_info).await?;
 
-        verify_package(&package_data, &package_info.dist.shasum)?;
+        ChecksumIntegrityChecker::verify_package(&package_data, &package_info.dist.shasum)?;
 
         self.extract_package(&package_data, package_name).await?;
 
@@ -88,13 +87,14 @@ impl PackageInstaller {
         temp_file.write_all(package_data).await?;
         temp_file.flush().await?;
 
+        let install_path = self.install_path.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let tar_gz = fs::File::open(temp_path)?;
+            let tar_gz = std::fs::File::open(temp_path)?;
             let tar = GzDecoder::new(tar_gz);
             let mut archive = Archive::new(tar);
 
             archive
-                .unpack(&self.install_path)
+                .unpack(&install_path)
                 .map_err(|e| InstallError::ExtractionError(e.to_string()))?;
 
             Ok(())

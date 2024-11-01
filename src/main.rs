@@ -4,6 +4,7 @@ mod error;
 mod install;
 mod package;
 mod registry;
+mod verification;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
