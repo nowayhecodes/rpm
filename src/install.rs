@@ -11,22 +11,22 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 pub struct PackageInstaller {
-    global: bool,
+    _global: bool,
     registry: RegistryClient,
     install_path: PathBuf,
     http_client: Client,
 }
 
 impl PackageInstaller {
-    pub fn new(global: bool) -> Self {
-        let install_path = if global {
+    pub fn new(_global: bool) -> Self {
+        let install_path = if _global {
             PathBuf::from("/usr/local/lib/node_modules")
         } else {
             PathBuf::from("node_modules")
         };
 
         Self {
-            global,
+            _global,
             registry: RegistryClient::new(),
             install_path,
             http_client: Client::new(),
@@ -45,7 +45,6 @@ impl PackageInstaller {
 
     async fn install_package(&self, package_name: &str) -> Result<()> {
         let package_info = self.registry.fetch_package_info(package_name, None).await?;
-
         let package_data = self.download_package(&package_info).await?;
 
         ChecksumIntegrityChecker::verify_package(&package_data, &package_info.dist.shasum)?;

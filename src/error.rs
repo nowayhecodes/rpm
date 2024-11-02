@@ -21,5 +21,5 @@ pub enum InstallError {
     ExtractionError(String),
     
     #[error("Package verification failed: {0}")]
-    VerificationError(String),
+    _VerificationError(String),
 } 
