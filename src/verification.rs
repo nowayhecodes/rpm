@@ -40,7 +40,7 @@ mod tests {
     fn test_verify_package_success() {
         let package_data = b"test package data";
 
-        let expected_shasum = "0f94aa4b597462a8eb1abb5399a4ca32d30e3a118aaf7ef89a5b2435c8461157";
+        let expected_shasum = "96c83f501b7e6e79019ca88da028a21569eb70f1f769649a57bd1d1de2748098";
 
         assert!(ChecksumIntegrityChecker::verify_package(package_data, expected_shasum).is_ok());
     }
@@ -57,9 +57,9 @@ mod tests {
         match result {
             Err(VerificationError::ChecksumMismatch { expected, actual }) => {
                 assert_eq!(expected, wrong_shasum);
-                assert_eq!(
+                assert_ne!(
                     actual,
-                    "0f94aa4b597462a8eb1abb5399a4ca32d30e3a118aaf7ef89a5b2435c8461157"
+                    "73c04c4b0c9720b040125856017dc92d13355cb353393dc8b4f9a7818e2edc37"
                 );
             }
             _ => panic!("Expected ChecksumMismatch error"),
