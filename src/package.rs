@@ -3,6 +3,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::fs;
+use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +49,11 @@ impl PackageJson {
         if let Some(dev_deps) = &mut self.dev_dependencies {
             dev_deps.remove(package);
         }
+    }
+
+    pub async fn load_from(path: impl AsRef<Path>) -> Result<Self> {
+        let content = fs::read_to_string(path).await?;
+        Ok(serde_json::from_str(&content)?)
     }
 }
 

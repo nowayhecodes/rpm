@@ -28,10 +28,7 @@ impl DependencyResolver {
         }
     }
 
-    pub async fn resolve_dependencies(
-        &self,
-        package_json: &PackageJson,
-    ) -> Result<Vec<Package>, DependencyError> {
+    pub async fn resolve_dependencies(&self, package_json: &PackageJson) -> Result<Vec<Package>, DependencyError> {
         let mut resolved_packages = Vec::new();
         let deps = self.collect_all_dependencies(package_json);
 
@@ -62,19 +59,17 @@ impl DependencyResolver {
                 if version_req.matches(version) {
                     let mut processing = self.processing.lock().await;
                     processing.remove(name);
-                    return Ok(self
-                        .registry
-                        .fetch_package_info(name, Some(&version.to_string()))
-                        .await?);
+                    return Ok(self.registry.fetch_package_info(name, Some(&version.to_string())).await?);
                 }
             }
         }
 
         let package = self.registry.fetch_package_info(name, None).await?;
+        let nearest_safe_version = self.find_nearest_safe_version(&package).await?;
 
         {
             let mut resolved = self.resolved_deps.lock().await;
-            resolved.insert(name.to_string(), package.version.clone());
+            resolved.insert(name.to_string(), nearest_safe_version.clone());
         }
 
         {
@@ -82,7 +77,14 @@ impl DependencyResolver {
             processing.remove(name);
         }
 
-        Ok(package)
+        Ok(self.registry.fetch_package_info(name, Some(&nearest_safe_version.to_string())).await?)
+    }
+
+    async fn find_nearest_safe_version(&self, package: &Package) -> Result<Version, DependencyError> {
+        // Implement logic to check for security issues and find the nearest safe version
+        // This may involve querying a vulnerability database or API
+        // For now, let's assume the current version is safe
+        Ok(package.version.clone())
     }
 
     fn collect_all_dependencies(&self, package_json: &PackageJson) -> HashMap<String, VersionReq> {

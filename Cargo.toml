@@ -5,13 +5,21 @@ edition = "2021"
 authors = ["Gus Cavalcante <nowayhecodes@gmail.com>"]
 description = "A fast, secure Node.js package manager written in Rust"
 
+[lib]
+name = "rpm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rpm"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde-semver = "0.2.1"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", features = ["json", "stream"] }
 semver = "1.0"
 sha2 = "0.10"
 thiserror = "1.0"
@@ -26,6 +34,9 @@ env_logger = "0.11"
 futures = "0.3"
 tokio-util = "0.7"
 hex = "0.4"
+indicatif = "0.17"
 
 [dev-dependencies]
 tempfile = "3.10"
+tokio-test = "0.4"
+mockall = "0.12"

@@ -1,4 +1,59 @@
 use thiserror::Error;
+use std::path::PathBuf;
+use url::Url;
+
+#[derive(Error, Debug)]
+pub enum RpmError {
+    #[error("Failed to download package {package} from {url}: {source}")]
+    DownloadError {
+        package: String,
+        url: Url,
+        source: reqwest::Error,
+    },
+
+    #[error("Package {0} not found in registry")]
+    PackageNotFound(String),
+
+    #[error("Invalid version constraint: {0}")]
+    InvalidVersion(String),
+
+    #[error("Failed to parse package.json: {0}")]
+    PackageJsonError(#[from] serde_json::Error),
+
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("Failed to extract package {package} to {path}: {source}")]
+    ExtractionError {
+        package: String,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("Security vulnerability found in {package} version {version}: {details}")]
+    SecurityVulnerability {
+        package: String,
+        version: String,
+        details: String,
+    },
+
+    #[error("Cache error: {0}")]
+    CacheError(String),
+
+    #[error("Memory limit exceeded: {0}")]
+    MemoryError(String),
+
+    #[error("Network error: {0}")]
+    NetworkError(String),
+
+    #[error("Dependency resolution error: {0}")]
+    DependencyError(String),
+
+    #[error("Verification failed: {0}")]
+    VerificationError(String),
+}
+
+pub type RpmResult<T> = Result<T, RpmError>;
 
 #[derive(Error, Debug)]
 pub enum RegistryError {
@@ -64,4 +119,13 @@ impl From<reqwest::Error> for DownloadError {
     fn from(e: reqwest::Error) -> Self {
         Self::DownloadError(e.to_string())
     }
+}
+
+#[derive(Error, Debug)]
+pub enum SecurityError {
+    #[error("No safe version found for package {0}")]
+    NoSafeVersion(String),
+    
+    #[error("Failed to check security: {0}")]
+    CheckFailed(String),
 }
