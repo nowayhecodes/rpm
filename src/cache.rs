@@ -1,47 +1,47 @@
 use crate::error::{RpmError, RpmResult};
-use async_trait::async_trait;
-use sha2::{Sha256, Digest};
-use std::path::{Path, PathBuf};
-use tokio::fs;
 use log::{debug, info, warn};
-use std::time::{SystemTime, Duration};
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
+use tokio::fs;
 
+#[derive(Clone)]
 pub struct CacheConfig {
     pub cache_dir: PathBuf,
-    pub max_size: u64,        // Maximum cache size in bytes
-    pub ttl: Duration,        // Time-to-live for cached packages
+    pub max_size: u64, // Maximum cache size in bytes
+    pub ttl: Duration, // Time-to-live for cached packages
     pub cleanup_interval: Duration,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
-        let cache_dir = dirs::cache_dir()
+        let cache_dir = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("."))
             .join("rpm");
 
         Self {
             cache_dir,
-            max_size: 1024 * 1024 * 1024, // 1GB
-            ttl: Duration::from_secs(7 * 24 * 60 * 60), // 1 week
+            max_size: 1024 * 1024 * 1024,                   // 1GB
+            ttl: Duration::from_secs(7 * 24 * 60 * 60),     // 1 week
             cleanup_interval: Duration::from_secs(60 * 60), // 1 hour
         }
     }
 }
 
+#[derive(Clone)]
 pub struct PackageCache {
     config: CacheConfig,
-    last_cleanup: SystemTime,
 }
 
 impl PackageCache {
     pub async fn new(config: CacheConfig) -> RpmResult<Self> {
-        fs::create_dir_all(&config.cache_dir).await
-            .map_err(|e| RpmError::CacheError(format!("Failed to create cache directory: {}", e)))?;
+        fs::create_dir_all(&config.cache_dir).await.map_err(|e| {
+            RpmError::CacheError(format!("Failed to create cache directory: {}", e))
+        })?;
 
-        let cache = Self {
-            config,
-            last_cleanup: SystemTime::now(),
-        };
+        let cache = Self { config };
 
         cache.init_cleanup_task();
         Ok(cache)
@@ -64,8 +64,9 @@ impl PackageCache {
         let cache_path = self.config.cache_dir.join(cache_key);
 
         if cache_path.exists() {
-            let metadata = fs::metadata(&cache_path).await
-                .map_err(|e| RpmError::CacheError(format!("Failed to read cache metadata: {}", e)))?;
+            let metadata = fs::metadata(&cache_path).await.map_err(|e| {
+                RpmError::CacheError(format!("Failed to read cache metadata: {}", e))
+            })?;
 
             let age = SystemTime::now()
                 .duration_since(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH))
@@ -89,7 +90,8 @@ impl PackageCache {
             warn!("Failed to ensure cache size: {}", e);
         }
 
-        fs::write(&cache_path, data).await
+        fs::write(&cache_path, data)
+            .await
             .map_err(|e| RpmError::CacheError(format!("Failed to write to cache: {}", e)))?;
 
         info!("Cached package {} version {}", package, version);
@@ -106,17 +108,24 @@ impl PackageCache {
         let mut total_size = new_size;
         let mut entries = Vec::new();
 
-        let mut dir = fs::read_dir(&self.config.cache_dir).await
+        let mut dir = fs::read_dir(&self.config.cache_dir)
+            .await
             .map_err(|e| RpmError::CacheError(format!("Failed to read cache directory: {}", e)))?;
 
-        while let Some(entry) = dir.next_entry().await
-            .map_err(|e| RpmError::CacheError(format!("Failed to read cache entry: {}", e)))? {
-            
-            let metadata = entry.metadata().await
-                .map_err(|e| RpmError::CacheError(format!("Failed to read entry metadata: {}", e)))?;
-            
+        while let Some(entry) = dir
+            .next_entry()
+            .await
+            .map_err(|e| RpmError::CacheError(format!("Failed to read cache entry: {}", e)))?
+        {
+            let metadata = entry.metadata().await.map_err(|e| {
+                RpmError::CacheError(format!("Failed to read entry metadata: {}", e))
+            })?;
+
             total_size += metadata.len();
-            entries.push((entry.path(), metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+            entries.push((
+                entry.path(),
+                metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            ));
         }
 
         if total_size > self.config.max_size {
@@ -142,14 +151,18 @@ impl PackageCache {
     }
 
     async fn cleanup_old_packages(config: &CacheConfig) -> RpmResult<()> {
-        let mut dir = fs::read_dir(&config.cache_dir).await
+        let mut dir = fs::read_dir(&config.cache_dir)
+            .await
             .map_err(|e| RpmError::CacheError(format!("Failed to read cache directory: {}", e)))?;
 
-        while let Some(entry) = dir.next_entry().await
-            .map_err(|e| RpmError::CacheError(format!("Failed to read cache entry: {}", e)))? {
-            
-            let metadata = entry.metadata().await
-                .map_err(|e| RpmError::CacheError(format!("Failed to read entry metadata: {}", e)))?;
+        while let Some(entry) = dir
+            .next_entry()
+            .await
+            .map_err(|e| RpmError::CacheError(format!("Failed to read cache entry: {}", e)))?
+        {
+            let metadata = entry.metadata().await.map_err(|e| {
+                RpmError::CacheError(format!("Failed to read entry metadata: {}", e))
+            })?;
 
             let age = SystemTime::now()
                 .duration_since(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH))
@@ -157,11 +170,15 @@ impl PackageCache {
 
             if age > config.ttl {
                 if let Err(e) = fs::remove_file(entry.path()).await {
-                    warn!("Failed to remove old cache entry {}: {}", entry.path().display(), e);
+                    warn!(
+                        "Failed to remove old cache entry {}: {}",
+                        entry.path().display(),
+                        e
+                    );
                 }
             }
         }
 
         Ok(())
     }
-} 
+}

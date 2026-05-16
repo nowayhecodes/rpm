@@ -1,11 +1,19 @@
 use crate::{
-    AppContext,
+    cache::{CacheConfig, PackageCache},
+    dependency::DependencyResolver,
     error::RpmResult,
     install::PackageInstaller,
     package::PackageJson,
+    profiling::MemoryProfile,
+    registry::RegistryClient,
+    security::SecurityChecker,
+    AppContext,
 };
 use clap::{Parser, Subcommand};
 use log::{debug, info};
+use semver::Version;
+use std::{ffi::OsString, path::PathBuf, sync::Arc};
+use tokio::fs;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -43,15 +51,30 @@ pub enum Commands {
 }
 
 impl Cli {
-    pub async fn execute(self, context: AppContext) -> RpmResult<()> {
+    pub fn parse_from<I, T>(itr: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        <Self as Parser>::parse_from(itr)
+    }
+
+    pub async fn execute(self) -> RpmResult<()> {
+        let memory_profile = MemoryProfile::new(1024 * 1024 * 1024);
+        let package_cache = PackageCache::new(CacheConfig::default()).await?;
+        self.execute_with_context(AppContext {
+            memory_profile,
+            package_cache,
+        })
+        .await
+    }
+
+    pub async fn execute_with_context(self, context: AppContext) -> RpmResult<()> {
         match self.command {
             Commands::Install { packages, global } => {
                 debug!("Installing packages: {:?}", packages);
-                let installer = PackageInstaller::new(
-                    global,
-                    context.package_cache,
-                    context.memory_profile,
-                );
+                let installer =
+                    PackageInstaller::new(global, context.package_cache, context.memory_profile);
                 installer.install_packages(&packages).await?;
                 info!("Successfully installed packages: {:?}", packages);
             }
@@ -60,52 +83,15 @@ impl Cli {
                 let registry = Arc::new(RegistryClient::new());
                 let resolver = DependencyResolver::new(registry);
 
-                match packages {
-                    Some(packages) => {
-                        for package in packages {
-                            if let Some(deps) = &package_json.dependencies {
-                                if let Some(current_version) = deps.get(&package) {
-                                    println!(
-                                        "Updating {} from version {}",
-                                        package, current_version
-                                    );
-
-                                    let latest = resolver
-                                        .resolve_single_dependency(
-                                            &package,
-                                            &semver::VersionReq::parse("*").unwrap(),
-                                        )
-                                        .await?;
-
-                                    if latest.version
-                                        > semver::Version::parse(current_version).unwrap()
-                                    {
-                                        let package_name = package.clone();
-                                        let installer = PackageInstaller::new(false);
-                                        installer.install_packages(&[package_name]).await?;
-                                        println!(
-                                            "Updated {} to version {}",
-                                            package, latest.version
-                                        );
-                                    } else {
-                                        println!("{} is already at the latest version", package);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    None => {
+                if !packages.is_empty() {
+                    for package in packages {
                         if let Some(deps) = &package_json.dependencies {
-                            for (package, current_version) in deps {
-                                println!(
-                                    "Checking updates for {} (current: {})",
-                                    package, current_version
-                                );
+                            if let Some(current_version) = deps.get(&package) {
+                                println!("Updating {} from version {}", package, current_version);
 
                                 let latest = resolver
                                     .resolve_single_dependency(
-                                        package,
+                                        &package,
                                         &semver::VersionReq::parse("*").unwrap(),
                                     )
                                     .await?;
@@ -113,12 +99,45 @@ impl Cli {
                                 if latest.version > semver::Version::parse(current_version).unwrap()
                                 {
                                     let package_name = package.clone();
-                                    let installer = PackageInstaller::new(false);
+                                    let installer = PackageInstaller::new(
+                                        false,
+                                        context.package_cache.clone(),
+                                        context.memory_profile.clone(),
+                                    );
                                     installer.install_packages(&[package_name]).await?;
                                     println!("Updated {} to version {}", package, latest.version);
                                 } else {
                                     println!("{} is already at the latest version", package);
                                 }
+                            }
+                        }
+                    }
+                } else {
+                    if let Some(deps) = &package_json.dependencies {
+                        for (package, current_version) in deps {
+                            println!(
+                                "Checking updates for {} (current: {})",
+                                package, current_version
+                            );
+
+                            let latest = resolver
+                                .resolve_single_dependency(
+                                    package,
+                                    &semver::VersionReq::parse("*").unwrap(),
+                                )
+                                .await?;
+
+                            if latest.version > semver::Version::parse(current_version).unwrap() {
+                                let package_name = package.clone();
+                                let installer = PackageInstaller::new(
+                                    false,
+                                    context.package_cache.clone(),
+                                    context.memory_profile.clone(),
+                                );
+                                installer.install_packages(&[package_name]).await?;
+                                println!("Updated {} to version {}", package, latest.version);
+                            } else {
+                                println!("{} is already at the latest version", package);
                             }
                         }
                     }
@@ -148,9 +167,9 @@ impl Cli {
                     }
                 }
             }
-            Commands::List => {
+            Commands::List { global } => {
                 println!("Installed packages:");
-                
+
                 // Read package.json for local packages
                 if let Ok(package_json) = PackageJson::load().await {
                     println!("\nLocal packages:");
@@ -159,7 +178,7 @@ impl Cli {
                             println!("  {} @ {}", name, version);
                         }
                     }
-                    
+
                     if let Some(dev_deps) = &package_json.dev_dependencies {
                         println!("\nDev dependencies:");
                         for (name, version) in dev_deps {
@@ -167,16 +186,18 @@ impl Cli {
                         }
                     }
                 }
-                
+
                 // List global packages
                 let global_dir = PathBuf::from("/usr/local/lib/node_modules");
-                if global_dir.exists() {
+                if global && global_dir.exists() {
                     println!("\nGlobal packages:");
                     let mut entries = fs::read_dir(global_dir).await?;
                     while let Some(entry) = entries.next_entry().await? {
                         if entry.file_type().await?.is_dir() {
                             if let Some(name) = entry.file_name().to_str() {
-                                if let Ok(package_json) = PackageJson::load_from(entry.path().join("package.json")).await {
+                                if let Ok(package_json) =
+                                    PackageJson::load_from(entry.path().join("package.json")).await
+                                {
                                     println!("  {} @ {}", name, package_json.version);
                                 }
                             }
@@ -186,7 +207,7 @@ impl Cli {
             }
             Commands::Audit { fix } => {
                 println!("Auditing packages for security vulnerabilities...");
-                
+
                 let mut package_json = PackageJson::load().await?;
                 let mut security_checker = SecurityChecker::new();
                 let mut vulnerabilities_found = false;
@@ -202,13 +223,13 @@ impl Cli {
                         if !vulns.is_empty() {
                             vulnerabilities_found = true;
                             println!("\nVulnerabilities found in {}", name);
-                            
+
                             for vuln in &vulns {
                                 println!("\nID: {}", vuln.id);
                                 println!("Title: {}", vuln.title);
                                 println!("Severity: {}", vuln.severity);
                                 println!("Description: {}", vuln.description);
-                                
+
                                 if let Some(patched) = &vuln.patched_version {
                                     println!("Patched version: {}", patched);
                                 }
@@ -218,7 +239,7 @@ impl Cli {
                                 // Get all available versions from registry
                                 let registry = Arc::new(RegistryClient::new());
                                 let package_info = registry.fetch_package_info(name, None).await?;
-                                let available_versions = vec![package_info.version];  // Simplified for now
+                                let available_versions = vec![package_info.version]; // Simplified for now
 
                                 if let Ok(safe_version) = security_checker
                                     .find_safe_version(name, &version, &available_versions)

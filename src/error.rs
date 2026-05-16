@@ -1,5 +1,5 @@
-use thiserror::Error;
 use std::path::PathBuf;
+use thiserror::Error;
 use url::Url;
 
 #[derive(Error, Debug)]
@@ -51,9 +51,54 @@ pub enum RpmError {
 
     #[error("Verification failed: {0}")]
     VerificationError(String),
+
+    #[error("Task failed: {0}")]
+    TaskError(String),
+
+    #[error("Invalid URL: {0}")]
+    UrlError(#[from] url::ParseError),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 pub type RpmResult<T> = Result<T, RpmError>;
+
+impl From<tokio::task::JoinError> for RpmError {
+    fn from(value: tokio::task::JoinError) -> Self {
+        Self::TaskError(value.to_string())
+    }
+}
+
+impl From<tokio::sync::AcquireError> for RpmError {
+    fn from(value: tokio::sync::AcquireError) -> Self {
+        Self::TaskError(value.to_string())
+    }
+}
+
+impl From<semver::Error> for RpmError {
+    fn from(value: semver::Error) -> Self {
+        Self::InvalidVersion(value.to_string())
+    }
+}
+
+impl From<RegistryError> for RpmError {
+    fn from(value: RegistryError) -> Self {
+        Self::NetworkError(value.to_string())
+    }
+}
+
+impl From<DependencyError> for RpmError {
+    fn from(value: DependencyError) -> Self {
+        Self::DependencyError(value.to_string())
+    }
+}
+
+impl From<crate::verification::VerificationError> for RpmError {
+    fn from(value: crate::verification::VerificationError) -> Self {
+        Self::VerificationError(value.to_string())
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum RegistryError {
@@ -86,7 +131,7 @@ pub enum InstallError {
 pub enum DependencyError {
     #[error("Circular dependency detected: {0}")]
     CircularDependency(String),
-    
+
     #[error("Registry error: {0}")]
     RegistryError(#[from] RegistryError),
 }
@@ -125,7 +170,7 @@ impl From<reqwest::Error> for DownloadError {
 pub enum SecurityError {
     #[error("No safe version found for package {0}")]
     NoSafeVersion(String),
-    
+
     #[error("Failed to check security: {0}")]
     CheckFailed(String),
 }

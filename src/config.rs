@@ -1,18 +1,39 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::fs;
 use url::Url;
-use anyhow::Result;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(with = "url_string")]
     pub registry_url: Url,
     pub cache_dir: PathBuf,
     pub global_packages_dir: PathBuf,
     pub timeout: u64,
     pub max_concurrent_downloads: usize,
     pub offline_mode: bool,
+}
+
+mod url_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use url::Url;
+
+    pub fn serialize<S>(url: &Url, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(url.as_str())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Url, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Url::parse(&value).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Default for Config {
@@ -47,4 +68,4 @@ impl Config {
     pub fn get_timeout(&self) -> Duration {
         Duration::from_secs(self.timeout)
     }
-} 
+}

@@ -1,8 +1,9 @@
+use log::{info, warn};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::time::Duration;
-use log::{info, warn};
 
+#[derive(Clone)]
 pub struct MemoryProfile {
     allocated: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
@@ -13,7 +14,7 @@ impl MemoryProfile {
     pub fn new(threshold: usize) -> Self {
         let allocated = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
-        
+
         let profile = Self {
             allocated: Arc::clone(&allocated),
             peak: Arc::clone(&peak),
@@ -27,7 +28,7 @@ impl MemoryProfile {
     pub fn allocate(&self, size: usize) {
         let current = self.allocated.fetch_add(size, Ordering::SeqCst);
         let new_total = current + size;
-        
+
         // Update peak if necessary
         let mut current_peak = self.peak.load(Ordering::SeqCst);
         while new_total > current_peak {
@@ -73,7 +74,7 @@ impl MemoryProfile {
                 tokio::time::sleep(interval).await;
                 let current = allocated.load(Ordering::SeqCst);
                 let peak_usage = peak.load(Ordering::SeqCst);
-                
+
                 info!(
                     "Memory usage - Current: {} bytes, Peak: {} bytes, Threshold: {} bytes",
                     current, peak_usage, threshold
@@ -110,4 +111,4 @@ mod tests {
         profile.allocate(600); // This should trigger a warning log
         assert_eq!(profile.current_usage(), 1100);
     }
-} 
+}

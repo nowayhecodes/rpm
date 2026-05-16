@@ -1,6 +1,7 @@
-use log::{LevelFilter, Record};
-use env_logger::{Builder, fmt::{Color, Style, StyledValue}};
+use env_logger::Builder;
+use log::LevelFilter;
 use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct LoggingConfig {
     pub level: LevelFilter,
@@ -24,17 +25,17 @@ pub fn setup_logging(config: LoggingConfig) {
     let mut builder = Builder::new();
 
     builder.format(move |buf, record| {
-        let mut style = buf.style();
-
-        let level = colored_level(&mut style, record.level());
-
         let mut output = String::new();
 
         if config.show_timestamps {
-            output.push_str(&format!("[{}] ", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default();
+            output.push_str(&format!("[{}] ", timestamp));
         }
 
-        output.push_str(&format!("{}: ", level));
+        output.push_str(&format!("{}: ", record.level()));
 
         if config.show_module_path {
             if let Some(module_path) = record.module_path() {
@@ -49,13 +50,3 @@ pub fn setup_logging(config: LoggingConfig) {
     builder.filter_level(config.level);
     builder.init();
 }
-
-fn colored_level(style: &mut Style, level: log::Level) -> StyledValue<&'static str> {
-    match level {
-        log::Level::Trace => style.set_color(Color::Magenta).value("TRACE"),
-        log::Level::Debug => style.set_color(Color::Blue).value("DEBUG"),
-        log::Level::Info => style.set_color(Color::Green).value("INFO"),
-        log::Level::Warn => style.set_color(Color::Yellow).value("WARN"),
-        log::Level::Error => style.set_color(Color::Red).value("ERROR"),
-    }
-} 
