@@ -1,6 +1,6 @@
 [package]
 name = "rpm"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Gus Cavalcante <nowayhecodes@gmail.com>"]
 description = "A fast, secure Node.js package manager written in Rust"
