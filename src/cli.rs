@@ -12,7 +12,12 @@ use crate::{
 use clap::{Parser, Subcommand};
 use log::{debug, info};
 use semver::Version;
-use std::{ffi::OsString, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::fs;
 
 #[derive(Parser)]
@@ -27,6 +32,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    Init {
+        #[arg(long)]
+        ts: bool,
+        #[arg(long)]
+        name: Option<String>,
+    },
     Install {
         packages: Vec<String>,
         #[arg(short, long)]
@@ -62,24 +73,33 @@ impl Cli {
     pub async fn execute(self) -> RpmResult<()> {
         let memory_profile = MemoryProfile::new(1024 * 1024 * 1024);
         let package_cache = PackageCache::new(CacheConfig::default()).await?;
+        let project_dir = std::env::current_dir()?;
         self.execute_with_context(AppContext {
             memory_profile,
             package_cache,
+            project_dir,
         })
         .await
     }
 
     pub async fn execute_with_context(self, context: AppContext) -> RpmResult<()> {
         match self.command {
+            Commands::Init { ts, name } => {
+                Self::init_project(&context, name, ts).await?;
+            }
             Commands::Install { packages, global } => {
                 debug!("Installing packages: {:?}", packages);
-                let installer =
-                    PackageInstaller::new(global, context.package_cache, context.memory_profile);
+                let installer = PackageInstaller::new_in_project(
+                    global,
+                    context.package_cache,
+                    context.memory_profile,
+                    context.project_dir,
+                );
                 installer.install_packages(&packages).await?;
                 info!("Successfully installed packages: {:?}", packages);
             }
             Commands::Update { packages } => {
-                let package_json = PackageJson::load().await?;
+                let package_json = PackageJson::load_from(context.package_json_path()).await?;
                 let registry = Arc::new(RegistryClient::new());
                 let resolver = DependencyResolver::new(registry);
 
@@ -99,10 +119,11 @@ impl Cli {
                                 if latest.version > semver::Version::parse(current_version).unwrap()
                                 {
                                     let package_name = package.clone();
-                                    let installer = PackageInstaller::new(
+                                    let installer = PackageInstaller::new_in_project(
                                         false,
                                         context.package_cache.clone(),
                                         context.memory_profile.clone(),
+                                        context.project_dir.clone(),
                                     );
                                     installer.install_packages(&[package_name]).await?;
                                     println!("Updated {} to version {}", package, latest.version);
@@ -129,10 +150,11 @@ impl Cli {
 
                             if latest.version > semver::Version::parse(current_version).unwrap() {
                                 let package_name = package.clone();
-                                let installer = PackageInstaller::new(
+                                let installer = PackageInstaller::new_in_project(
                                     false,
                                     context.package_cache.clone(),
                                     context.memory_profile.clone(),
+                                    context.project_dir.clone(),
                                 );
                                 installer.install_packages(&[package_name]).await?;
                                 println!("Updated {} to version {}", package, latest.version);
@@ -147,7 +169,7 @@ impl Cli {
                 let base_path = if global {
                     PathBuf::from("/usr/local/lib/node_modules")
                 } else {
-                    PathBuf::from("node_modules")
+                    context.node_modules_path()
                 };
 
                 for package in packages {
@@ -157,9 +179,12 @@ impl Cli {
                         println!("Successfully removed package: {}", package);
 
                         if !global {
-                            if let Ok(mut package_json) = PackageJson::load().await {
+                            let package_json_path = context.package_json_path();
+                            if let Ok(mut package_json) =
+                                PackageJson::load_from(&package_json_path).await
+                            {
                                 package_json.remove_dependency(&package);
-                                package_json.save().await?;
+                                package_json.save_to(&package_json_path).await?;
                             }
                         }
                     } else {
@@ -171,7 +196,8 @@ impl Cli {
                 println!("Installed packages:");
 
                 // Read package.json for local packages
-                if let Ok(package_json) = PackageJson::load().await {
+                if let Ok(package_json) = PackageJson::load_from(context.package_json_path()).await
+                {
                     println!("\nLocal packages:");
                     if let Some(deps) = &package_json.dependencies {
                         for (name, version) in deps {
@@ -208,7 +234,8 @@ impl Cli {
             Commands::Audit { fix } => {
                 println!("Auditing packages for security vulnerabilities...");
 
-                let mut package_json = PackageJson::load().await?;
+                let package_json_path = context.package_json_path();
+                let mut package_json = PackageJson::load_from(&package_json_path).await?;
                 let mut security_checker = SecurityChecker::new();
                 let mut vulnerabilities_found = false;
                 let mut fixes_applied = false;
@@ -258,7 +285,7 @@ impl Cli {
                             deps.insert(name.clone(), new_version.clone());
                             println!("Updated {} to version {}", name, new_version);
                         }
-                        package_json.save().await?;
+                        package_json.save_to(&package_json_path).await?;
                         println!("\nUpdated package.json with security fixes");
                     }
                 }
@@ -273,4 +300,123 @@ impl Cli {
 
         Ok(())
     }
+
+    async fn init_project(context: &AppContext, name: Option<String>, ts: bool) -> RpmResult<()> {
+        let (project_dir, package_name) = match name {
+            Some(name) => {
+                let sanitized = sanitize_package_name(&name);
+                (context.project_dir.join(&sanitized), sanitized)
+            }
+            None => {
+                let name = context
+                    .project_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(sanitize_package_name)
+                    .unwrap_or_else(|| "rpm-project".to_string());
+                (context.project_dir.clone(), name)
+            }
+        };
+
+        fs::create_dir_all(&project_dir).await?;
+
+        let package_json_path = project_dir.join("package.json");
+        if package_json_path.exists() {
+            return Err(anyhow::anyhow!(
+                "package.json already exists at {}",
+                package_json_path.display()
+            )
+            .into());
+        }
+
+        let package_json = if ts {
+            typescript_package_json(package_name)
+        } else {
+            PackageJson::new(package_name)
+        };
+        package_json.save_to(&package_json_path).await?;
+
+        if ts {
+            write_typescript_project_files(&project_dir).await?;
+        }
+
+        println!("Initialized project in {}", project_dir.display());
+        Ok(())
+    }
+}
+
+fn sanitize_package_name(name: &str) -> String {
+    let sanitized = name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| match character {
+            'a'..='z' | '0'..='9' | '-' | '_' | '.' => character,
+            _ => '-',
+        })
+        .collect::<String>()
+        .trim_matches(|character| matches!(character, '-' | '_' | '.'))
+        .to_string();
+
+    if sanitized.is_empty() {
+        "rpm-project".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn typescript_package_json(name: String) -> PackageJson {
+    PackageJson {
+        name,
+        version: "1.0.0".to_string(),
+        description: None,
+        main: Some("dist/index.js".to_string()),
+        types: Some("dist/index.d.ts".to_string()),
+        scripts: Some(BTreeMap::from([
+            ("build".to_string(), "tsc".to_string()),
+            ("start".to_string(), "node dist/index.js".to_string()),
+            ("typecheck".to_string(), "tsc --noEmit".to_string()),
+        ])),
+        dependencies: None,
+        dev_dependencies: Some(HashMap::from([(
+            "typescript".to_string(),
+            "^6.0.3".to_string(),
+        )])),
+        license: Some("ISC".to_string()),
+    }
+}
+
+async fn write_typescript_project_files(project_dir: &Path) -> RpmResult<()> {
+    fs::create_dir_all(project_dir.join("src")).await?;
+
+    let tsconfig = serde_json::json!({
+        "compilerOptions": {
+            "target": "ES2022",
+            "module": "NodeNext",
+            "moduleResolution": "NodeNext",
+            "rootDir": "src",
+            "outDir": "dist",
+            "declaration": true,
+            "sourceMap": true,
+            "strict": true,
+            "esModuleInterop": true,
+            "forceConsistentCasingInFileNames": true,
+            "skipLibCheck": true
+        },
+        "include": ["src/**/*.ts"],
+        "exclude": ["node_modules", "dist"]
+    });
+
+    fs::write(
+        project_dir.join("tsconfig.json"),
+        serde_json::to_string_pretty(&tsconfig)?,
+    )
+    .await?;
+    fs::write(
+        project_dir.join("src").join("index.ts"),
+        "console.log(\"Hello from rpm + TypeScript\");\n",
+    )
+    .await?;
+
+    Ok(())
 }

@@ -42,6 +42,7 @@ async fn main() -> RpmResult<()> {
     let context = AppContext {
         memory_profile: memory_profile.clone(),
         package_cache: package_cache.clone(),
+        project_dir: std::env::current_dir()?,
     };
 
     // Execute CLI command with context

@@ -32,10 +32,19 @@ pub struct PackageInstaller {
 
 impl PackageInstaller {
     pub fn new(global: bool, cache: PackageCache, memory_profile: MemoryProfile) -> Self {
+        Self::new_in_project(global, cache, memory_profile, ".")
+    }
+
+    pub fn new_in_project(
+        global: bool,
+        cache: PackageCache,
+        memory_profile: MemoryProfile,
+        project_dir: impl Into<PathBuf>,
+    ) -> Self {
         let install_path = if global {
             PathBuf::from("/usr/local/lib/node_modules")
         } else {
-            PathBuf::from("node_modules")
+            project_dir.into().join("node_modules")
         };
 
         Self {

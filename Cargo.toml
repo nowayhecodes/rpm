@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Gus Cavalcante <nowayhecodes@gmail.com>"]
 description = "A fast, secure Node.js package manager written in Rust"
+license = "MIT"
+repository = "https://github.com/nowayhecodes/rpm"
+homepage = "https://github.com/nowayhecodes/rpm"
+documentation = "https://github.com/nowayhecodes/rpm#readme"
+readme = "README.md"
+keywords = ["node", "npm", "package-manager", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.75"
+exclude = [".github/", ".idea/", "target/"]
 
 [lib]
 name = "rpm"
