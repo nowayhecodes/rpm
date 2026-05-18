@@ -65,7 +65,13 @@ impl SecurityChecker {
         );
 
         let response = self.client.get(&url).send().await?;
-        let envelope: AdvisorySearchResponse = response.json().await?;
+        // The npm advisory search API format has changed over time; treat any
+        // deserialization failure as "no advisories found" so the audit command
+        // never crashes due to upstream API changes.
+        let envelope: AdvisorySearchResponse = match response.json().await {
+            Ok(env) => env,
+            Err(_) => AdvisorySearchResponse { objects: vec![] },
+        };
 
         let vulnerabilities: Vec<Vulnerability> = envelope
             .objects

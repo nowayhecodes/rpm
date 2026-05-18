@@ -251,13 +251,44 @@ impl PackageInstaller {
             let tar = GzDecoder::new(tar_gz);
             let mut archive = Archive::new(tar);
 
+            // Extract to a staging directory that lives next to the final destination
+            // so both paths are on the same filesystem (enabling cheap rename).
+            let staging_path = package_path_clone.with_extension("__staging");
+            if staging_path.exists() {
+                std::fs::remove_dir_all(&staging_path)?;
+            }
+
             archive
-                .unpack(&package_path_clone)
+                .unpack(&staging_path)
                 .map_err(|e| RpmError::ExtractionError {
                     package: package_name.to_string(),
-                    path: package_path_clone.clone(),
+                    path: staging_path.clone(),
                     source: e,
                 })?;
+
+            // npm tarballs always contain a top-level "package/" directory.
+            // Promote its contents to the final destination so that
+            // node_modules/<name>/package.json exists (not node_modules/<name>/package/package.json).
+            let npm_subdir = staging_path.join("package");
+            let src = if npm_subdir.exists() {
+                npm_subdir
+            } else {
+                staging_path.clone()
+            };
+
+            if package_path_clone.exists() {
+                std::fs::remove_dir_all(&package_path_clone)?;
+            }
+            std::fs::rename(&src, &package_path_clone).map_err(|e| RpmError::ExtractionError {
+                package: package_name.to_string(),
+                path: package_path_clone.clone(),
+                source: e,
+            })?;
+
+            // Remove leftover staging dir (only present when npm_subdir branch was taken).
+            if staging_path.exists() {
+                let _ = std::fs::remove_dir_all(&staging_path);
+            }
 
             Ok(())
         })

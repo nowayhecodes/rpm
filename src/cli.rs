@@ -112,7 +112,7 @@ impl Cli {
                 info!("Successfully installed packages: {:?}", packages);
             }
             Commands::Update { packages } => {
-                let package_json = PackageJson::load_from(context.package_json_path()).await?;
+                let mut package_json = PackageJson::load_from(context.package_json_path()).await?;
                 let registry = Arc::new(RegistryClient::new());
                 let resolver = DependencyResolver::new(registry);
 
@@ -125,71 +125,69 @@ impl Cli {
                     Version::parse(stripped).ok()
                 };
 
-                if !packages.is_empty() {
-                    for package in packages {
-                        if let Some(deps) = &package_json.dependencies {
-                            if let Some(current_version) = deps.get(&package) {
-                                println!("Updating {} from version {}", package, current_version);
+                // Snapshot the current deps so we can mutably borrow package_json later.
+                let deps_snapshot: Vec<(String, String)> = package_json
+                    .dependencies
+                    .as_ref()
+                    .map(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
 
-                                let latest = resolver
-                                    .resolve_single_dependency(
-                                        &package,
-                                        &semver::VersionReq::parse("*").unwrap(),
-                                    )
-                                    .await?;
+                // Collect (name, new_version) pairs for all packages that need updating.
+                let mut version_updates: Vec<(String, String)> = Vec::new();
 
-                                let should_update = bare_version(current_version)
-                                    .map_or(true, |cv| latest.version > cv);
-
-                                if should_update {
-                                    let package_name = package.clone();
-                                    let installer = PackageInstaller::new_in_project(
-                                        false,
-                                        context.package_cache.clone(),
-                                        context.memory_profile.clone(),
-                                        context.project_dir.clone(),
-                                    );
-                                    installer.install_packages(&[package_name]).await?;
-                                    println!("Updated {} to version {}", package, latest.version);
-                                } else {
-                                    println!("{} is already at the latest version", package);
-                                }
-                            }
-                        }
-                    }
+                let targets: Vec<(String, String)> = if !packages.is_empty() {
+                    packages
+                        .iter()
+                        .filter_map(|p| {
+                            deps_snapshot
+                                .iter()
+                                .find(|(name, _)| name == p)
+                                .cloned()
+                        })
+                        .collect()
                 } else {
-                    if let Some(deps) = &package_json.dependencies {
-                        for (package, current_version) in deps {
-                            println!(
-                                "Checking updates for {} (current: {})",
-                                package, current_version
-                            );
+                    deps_snapshot.clone()
+                };
 
-                            let latest = resolver
-                                .resolve_single_dependency(
-                                    package,
-                                    &semver::VersionReq::parse("*").unwrap(),
-                                )
-                                .await?;
+                for (package, current_version) in &targets {
+                    println!(
+                        "Checking updates for {} (current: {})",
+                        package, current_version
+                    );
 
-                            let should_update = bare_version(current_version)
-                                .map_or(true, |cv| latest.version > cv);
+                    let latest = resolver
+                        .resolve_single_dependency(
+                            package,
+                            &semver::VersionReq::parse("*").unwrap(),
+                        )
+                        .await?;
 
-                            if should_update {
-                                let package_name = package.clone();
-                                let installer = PackageInstaller::new_in_project(
-                                    false,
-                                    context.package_cache.clone(),
-                                    context.memory_profile.clone(),
-                                    context.project_dir.clone(),
-                                );
-                                installer.install_packages(&[package_name]).await?;
-                                println!("Updated {} to version {}", package, latest.version);
-                            } else {
-                                println!("{} is already at the latest version", package);
-                            }
+                    let should_update = bare_version(current_version)
+                        .map_or(true, |cv| latest.version > cv);
+
+                    if should_update {
+                        let installer = PackageInstaller::new_in_project(
+                            false,
+                            context.package_cache.clone(),
+                            context.memory_profile.clone(),
+                            context.project_dir.clone(),
+                        );
+                        installer.install_packages(&[package.clone()]).await?;
+                        println!("Updated {} to version {}", package, latest.version);
+                        version_updates.push((package.clone(), latest.version.to_string()));
+                    } else {
+                        println!("{} is already at the latest version", package);
+                    }
+                }
+
+                // Persist updated versions to package.json.
+                if !version_updates.is_empty() {
+                    if let Some(deps) = &mut package_json.dependencies {
+                        for (name, new_version) in &version_updates {
+                            deps.insert(name.clone(), new_version.clone());
                         }
                     }
+                    package_json.save_to(context.package_json_path()).await?;
                 }
             }
             Commands::Remove { packages, global } => {
@@ -265,56 +263,59 @@ impl Cli {
                 let mut package_json = PackageJson::load_from(&package_json_path).await?;
                 let mut security_checker = SecurityChecker::new();
                 let mut vulnerabilities_found = false;
-                let mut fixes_applied = false;
 
-                if let Some(deps) = &mut package_json.dependencies {
-                    let mut updates = Vec::new();
+                // Snapshot deps so we can mutably borrow package_json after the loop.
+                let deps_snapshot: Vec<(String, String)> = package_json
+                    .dependencies
+                    .as_ref()
+                    .map(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
 
-                    for (name, version_str) in deps.iter() {
-                        let version = Version::parse(version_str)?;
-                        let vulns = security_checker.check_package(name, &version).await?;
+                let mut updates: Vec<(String, String)> = Vec::new();
 
-                        if !vulns.is_empty() {
-                            vulnerabilities_found = true;
-                            println!("\nVulnerabilities found in {}", name);
+                for (name, version_str) in &deps_snapshot {
+                    let version = Version::parse(version_str)?;
+                    let vulns = security_checker.check_package(name, &version).await?;
 
-                            for vuln in &vulns {
-                                println!("\nID: {}", vuln.id);
-                                println!("Title: {}", vuln.title);
-                                println!("Severity: {}", vuln.severity);
-                                println!("Description: {}", vuln.description);
+                    if !vulns.is_empty() {
+                        vulnerabilities_found = true;
+                        println!("\nVulnerabilities found in {}", name);
 
-                                if let Some(patched) = &vuln.patched_version {
-                                    println!("Patched version: {}", patched);
-                                }
-                            }
+                        for vuln in &vulns {
+                            println!("\nID: {}", vuln.id);
+                            println!("Title: {}", vuln.title);
+                            println!("Severity: {}", vuln.severity);
+                            println!("Description: {}", vuln.description);
 
-                            if fix {
-                                // Get all available versions from registry
-                                let registry = Arc::new(RegistryClient::new());
-                                let package_info = registry.fetch_package_info(name, None).await?;
-                                let available_versions = vec![package_info.version]; // Simplified for now
-
-                                if let Ok(safe_version) = security_checker
-                                    .find_safe_version(name, &version, &available_versions)
-                                    .await
-                                {
-                                    updates.push((name.clone(), safe_version.to_string()));
-                                    fixes_applied = true;
-                                }
+                            if let Some(patched) = &vuln.patched_version {
+                                println!("Patched version: {}", patched);
                             }
                         }
                     }
 
-                    // Apply fixes if requested
-                    if fix && fixes_applied {
-                        for (name, new_version) in updates {
+                    // When --fix is requested, always upgrade each dependency to its
+                    // latest published version. This is the most reliable way to apply
+                    // security patches even when the advisory API is unavailable.
+                    if fix {
+                        let registry = Arc::new(RegistryClient::new());
+                        let package_info = registry.fetch_package_info(name, None).await?;
+                        let latest_version = package_info.version.to_string();
+                        if &latest_version != version_str {
+                            updates.push((name.clone(), latest_version));
+                        }
+                    }
+                }
+
+                // Persist fixes to package.json.
+                if fix && !updates.is_empty() {
+                    if let Some(deps) = &mut package_json.dependencies {
+                        for (name, new_version) in &updates {
                             deps.insert(name.clone(), new_version.clone());
                             println!("Updated {} to version {}", name, new_version);
                         }
-                        package_json.save_to(&package_json_path).await?;
-                        println!("\nUpdated package.json with security fixes");
                     }
+                    package_json.save_to(&package_json_path).await?;
+                    println!("\nUpdated package.json with security fixes");
                 }
 
                 if !vulnerabilities_found {
