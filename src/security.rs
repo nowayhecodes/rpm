@@ -15,6 +15,28 @@ pub struct Vulnerability {
     pub patched_version: Option<String>,
 }
 
+// The npm advisory search API returns a paginated envelope, not a bare array.
+#[derive(Debug, Deserialize)]
+struct AdvisorySearchResponse {
+    objects: Vec<AdvisoryObject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvisoryObject {
+    advisory: AdvisoryDetail,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvisoryDetail {
+    id: u64,
+    title: String,
+    #[serde(default)]
+    overview: String,
+    severity: String,
+    vulnerable_versions: String,
+    patched_versions: Option<String>,
+}
+
 pub struct SecurityChecker {
     client: Client,
     cache: HashMap<String, Vec<Vulnerability>>,
@@ -33,14 +55,30 @@ impl SecurityChecker {
         name: &str,
         _version: &Version,
     ) -> Result<Vec<Vulnerability>> {
-        // Query the NPM Security Advisory Database
+        if let Some(cached) = self.cache.get(name) {
+            return Ok(cached.clone());
+        }
+
         let url = format!(
             "https://registry.npmjs.org/-/npm/v1/security/advisories/search?package={}",
             name
         );
 
         let response = self.client.get(&url).send().await?;
-        let vulnerabilities: Vec<Vulnerability> = response.json().await?;
+        let envelope: AdvisorySearchResponse = response.json().await?;
+
+        let vulnerabilities: Vec<Vulnerability> = envelope
+            .objects
+            .into_iter()
+            .map(|obj| Vulnerability {
+                id: obj.advisory.id.to_string(),
+                title: obj.advisory.title,
+                description: obj.advisory.overview,
+                severity: obj.advisory.severity,
+                affected_versions: obj.advisory.vulnerable_versions,
+                patched_version: obj.advisory.patched_versions,
+            })
+            .collect();
 
         self.cache.insert(name.to_string(), vulnerabilities.clone());
 

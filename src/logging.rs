@@ -1,4 +1,4 @@
-use env_logger::Builder;
+use env_logger::{Builder, Target};
 use log::LevelFilter;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,5 +48,9 @@ pub fn setup_logging(config: LoggingConfig) {
     });
 
     builder.filter_level(config.level);
+    // Write logs to stdout so they don't share stderr with indicatif's
+    // progress bars. Mixing both on the same fd breaks ANSI cursor positioning
+    // and causes bars to print new lines instead of updating in place.
+    builder.target(Target::Stdout);
     builder.init();
 }

@@ -10,14 +10,17 @@ use crate::{
 use flate2::read::GzDecoder;
 use futures::future::try_join_all;
 use futures::StreamExt;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
+use serde_json;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tar::Archive;
 use tokio::fs;
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use url;
 
 pub struct PackageInstaller {
@@ -61,76 +64,107 @@ impl PackageInstaller {
     pub async fn install_packages(&self, packages: &[String]) -> RpmResult<()> {
         fs::create_dir_all(&self.install_path).await?;
 
-        let m = MultiProgress::new();
-        let total_progress = m.add(ProgressBar::new(packages.len() as u64));
-        total_progress.set_style(
+        let bar = Arc::new(ProgressBar::new(packages.len() as u64));
+        bar.set_style(
             ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}",
             )
             .expect("valid progress template")
             .progress_chars("#>-"),
         );
+        bar.enable_steady_tick(Duration::from_millis(80));
 
-        let tasks: Vec<_> = packages
-            .iter()
-            .map(|package| {
-                let installer = self.clone();
-                let package = package.clone();
-                let pb = m.add(ProgressBar::new(4)); // Download, Verify, Extract, Scripts
-                pb.set_style(
-                    ProgressStyle::with_template(
-                        "{spinner:.green} {msg} [{wide_bar:.cyan/blue}] {pos}/{len}",
-                    )
-                    .expect("valid progress template")
-                    .progress_chars("#>-"),
-                );
-                pb.set_message(format!("Installing {}", package));
+        // Every package name that has been queued. The mutex lets concurrent
+        // tasks claim new packages atomically without duplicating work.
+        let queued: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(
+            packages.iter().cloned().collect(),
+        ));
 
-                tokio::spawn(async move {
-                    let _permit = installer.concurrent_limit.acquire().await?;
-                    let result = installer.install_package(&package, pb.clone()).await;
-                    pb.finish_and_clear();
-                    result
+        // BFS over the dependency tree. Each round installs one level in
+        // parallel; tasks return their direct dep names, which become the
+        // next round. This avoids recursive async futures (which hit Send
+        // bounds that the compiler can't satisfy across opaque impl Future
+        // return types).
+        let mut current_batch: Vec<String> = packages.to_vec();
+        while !current_batch.is_empty() {
+            let tasks: Vec<_> = current_batch
+                .into_iter()
+                .map(|package| {
+                    let installer = self.clone();
+                    let bar = Arc::clone(&bar);
+                    tokio::spawn(async move { installer.install_one(package, bar).await })
                 })
-            })
-            .collect();
+                .collect();
 
-        let results = try_join_all(tasks).await?;
-        for result in results {
-            result?;
-            total_progress.inc(1);
+            let mut next_raw: Vec<String> = Vec::new();
+            for result in try_join_all(tasks).await? {
+                next_raw.extend(result?);
+            }
+
+            // Keep only deps not already claimed by any other task.
+            let next_batch: Vec<String> = {
+                let mut lock = queued.lock().await;
+                next_raw
+                    .into_iter()
+                    .filter(|name| lock.insert(name.clone()))
+                    .collect()
+            };
+
+            if !next_batch.is_empty() {
+                bar.inc_length(next_batch.len() as u64);
+            }
+            current_batch = next_batch;
         }
 
-        total_progress.finish_with_message("All packages installed successfully!");
+        bar.finish_and_clear();
         Ok(())
     }
 
-    async fn install_package(&self, package_name: &str, progress: ProgressBar) -> RpmResult<()> {
-        // Download phase
-        progress.set_message(format!("Downloading {}", package_name));
-        let package_info = self.registry.fetch_package_info(package_name, None).await?;
+    /// Downloads, verifies, and extracts one package.
+    /// Returns the names of its direct dependencies for the caller to queue.
+    async fn install_one(
+        &self,
+        package_name: String,
+        bar: Arc<ProgressBar>,
+    ) -> RpmResult<Vec<String>> {
+        let permit = self.concurrent_limit.acquire().await?;
+
+        bar.set_message(format!("downloading {}", package_name));
+        let package_info = self.registry.fetch_package_info(&package_name, None).await?;
         let package_data = self.download_package(&package_info).await?;
-        progress.inc(1);
 
-        // Verify phase
-        progress.set_message(format!("Verifying {}", package_name));
+        bar.set_message(format!("verifying {}", package_name));
         ChecksumIntegrityChecker::verify_package(&package_data, &package_info.dist.shasum)?;
-        progress.inc(1);
 
-        // Extract phase
-        progress.set_message(format!("Extracting {}", package_name));
-        let package_path = self.extract_package(&package_data, package_name).await?;
-        progress.inc(1);
+        bar.set_message(format!("extracting {}", package_name));
+        let package_path = self.extract_package(&package_data, &package_name).await?;
 
-        // Run scripts in sandbox
-        progress.set_message(format!("Running scripts for {}", package_name));
-        let sandbox = Sandbox::new(&package_path);
-        if let Err(e) = sandbox.run_script("npm run prepare").await {
-            log::warn!("Failed to run prepare script: {}", e);
+        let dep_names: Vec<String> = package_info.dependencies.into_keys().collect();
+
+        drop(permit);
+        bar.inc(1);
+
+        // Run lifecycle scripts only if the package defines a "prepare" script.
+        // npm tarballs unpack into a "package/" subdirectory; check there first.
+        let pkg_subdir = package_path.join("package");
+        let script_dir = if pkg_subdir.exists() { pkg_subdir } else { package_path };
+        let pkg_json_path = script_dir.join("package.json");
+        let has_prepare = if let Ok(content) = fs::read_to_string(&pkg_json_path).await {
+            serde_json::from_str::<serde_json::Value>(&content)
+                .ok()
+                .and_then(|v| v["scripts"]["prepare"].as_str().map(|s| !s.is_empty()))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if has_prepare {
+            let sandbox = Sandbox::new(&script_dir);
+            if let Err(e) = sandbox.run_script("npm run prepare").await {
+                log::warn!("Failed to run prepare script for {}: {}", package_name, e);
+            }
         }
-        progress.inc(1);
 
-        Ok(())
+        Ok(dep_names)
     }
 
     async fn download_package(&self, package: &Package) -> RpmResult<Vec<u8>> {
@@ -190,7 +224,16 @@ impl PackageInstaller {
         let package_path = self.install_path.join(package_name);
         let package_name = package_name.to_string();
         let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().join(format!("{}.tgz", package_name));
+        // Scoped packages like "@nestjs/common" contain a slash; flatten it so the
+        // temp filename doesn't introduce a non-existent subdirectory.
+        let safe_name = package_name.replace('/', "__");
+        let temp_path = temp_dir.path().join(format!("{}.tgz", safe_name));
+
+        // For scoped packages the parent directory (e.g. node_modules/@nestjs) must
+        // exist before extraction.
+        if let Some(parent) = package_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
 
         // Track memory for temporary files
         self.memory_profile.allocate(package_data.len());

@@ -14,17 +14,25 @@ impl Sandbox {
     }
 
     pub async fn run_script(&self, script: &str) -> Result<()> {
-        // Create a new process with restricted permissions
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(script)
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = Command::new("cmd");
+            c.args(["/c", script]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = Command::new("sh");
+            c.args(["-c", script]);
+            c.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+            c.env_remove("HOME");
+            c.env_remove("USER");
+            c
+        };
+
+        let status = cmd
             .current_dir(&self.working_dir)
-            // Restrict permissions (Unix-specific)
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .env("NODE_ENV", "production")
-            // Prevent access to sensitive files
-            .env_remove("HOME")
-            .env_remove("USER")
             .status()?;
 
         if !status.success() {

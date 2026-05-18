@@ -10,6 +10,7 @@ use tokio::fs;
 pub struct Package {
     pub name: String,
     pub version: Version,
+    #[serde(default)]
     pub dependencies: HashMap<String, String>,
     pub dist: PackageDistribution,
 }

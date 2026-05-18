@@ -9,10 +9,25 @@ use rpm::{
     AppContext, Cli,
 };
 
+fn print_logo() {
+    // Teal-green body, orange eyes — matching the logo palette.
+    let g = "\x1b[36m";  // teal / seafoam green
+    let _o = "\x1b[33m";  // orange for the eyes
+    let b = "\x1b[1m";   // bold
+    let r = "\x1b[0m";   // reset
+
+    eprintln!();
+    eprintln!();
+    eprintln!("  {b}{g}RPM{r}  {g}The Fastest Node Package Manager  v{}{r}", env!("CARGO_PKG_VERSION"));
+    eprintln!();
+}
+
 #[tokio::main]
 async fn main() -> RpmResult<()> {
     // Parse command line arguments
     let cli = Cli::parse();
+
+    print_logo();
 
     // Setup logging based on verbosity flag
     let logging_config = LoggingConfig {

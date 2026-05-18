@@ -88,6 +88,19 @@ impl Cli {
                 Self::init_project(&context, name, ts).await?;
             }
             Commands::Install { packages, global } => {
+                let packages = if packages.is_empty() {
+                    let package_json = PackageJson::load_from(context.package_json_path()).await?;
+                    let mut all_packages = Vec::new();
+                    if let Some(deps) = package_json.dependencies {
+                        all_packages.extend(deps.into_keys());
+                    }
+                    if let Some(dev_deps) = package_json.dev_dependencies {
+                        all_packages.extend(dev_deps.into_keys());
+                    }
+                    all_packages
+                } else {
+                    packages
+                };
                 debug!("Installing packages: {:?}", packages);
                 let installer = PackageInstaller::new_in_project(
                     global,
@@ -103,6 +116,15 @@ impl Cli {
                 let registry = Arc::new(RegistryClient::new());
                 let resolver = DependencyResolver::new(registry);
 
+                // Strip leading range operators (^, ~, >=, etc.) to get a bare version
+                // for comparison. package.json stores ranges, not exact versions.
+                let bare_version = |s: &str| -> Option<Version> {
+                    let stripped = s.trim_start_matches(|c: char| {
+                        matches!(c, '^' | '~' | '>' | '<' | '=' | ' ')
+                    });
+                    Version::parse(stripped).ok()
+                };
+
                 if !packages.is_empty() {
                     for package in packages {
                         if let Some(deps) = &package_json.dependencies {
@@ -116,8 +138,10 @@ impl Cli {
                                     )
                                     .await?;
 
-                                if latest.version > semver::Version::parse(current_version).unwrap()
-                                {
+                                let should_update = bare_version(current_version)
+                                    .map_or(true, |cv| latest.version > cv);
+
+                                if should_update {
                                     let package_name = package.clone();
                                     let installer = PackageInstaller::new_in_project(
                                         false,
@@ -148,7 +172,10 @@ impl Cli {
                                 )
                                 .await?;
 
-                            if latest.version > semver::Version::parse(current_version).unwrap() {
+                            let should_update = bare_version(current_version)
+                                .map_or(true, |cv| latest.version > cv);
+
+                            if should_update {
                                 let package_name = package.clone();
                                 let installer = PackageInstaller::new_in_project(
                                     false,

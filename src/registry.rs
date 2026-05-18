@@ -36,7 +36,7 @@ impl RegistryClient {
         version: Option<&str>,
     ) -> Result<Package, RegistryError> {
         let url = match version {
-            Some(v) => self.registry_url.join(&format!("/{}/{}/-/{}-{}.tgz", name, v, name, v))?,
+            Some(v) => self.registry_url.join(&format!("/{}/{}", name, v))?,
             None => self.registry_url.join(&format!("/{}/latest", name))?,
         };
 

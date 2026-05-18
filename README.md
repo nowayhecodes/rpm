@@ -37,11 +37,11 @@ cargo install rpm
 
 ```bash
 # Default installation
-curl -fsSL https://raw.githubusercontent.com/nowayhecodes/rpm/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/nowayhecodes/rpm/release/install.sh | sh
 
 # Custom installation directory
 export RPM_INSTALL_DIR="$HOME/.local/bin"
-curl -fsSL https://raw.githubusercontent.com/nowayhecodes/rpm/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/nowayhecodes/rpm/release/install.sh | sh
 ```
 
 ⚠️ Always inspect installation scripts before running them with root privileges. You can view the script [here](https://raw.githubusercontent.com/nowayhecodes/rpm/main/install.sh).
