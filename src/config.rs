@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::fs;
 use url::Url;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(with = "url_string")]
     pub registry_url: Url,
@@ -38,10 +38,19 @@ mod url_string {
 
 impl Default for Config {
     fn default() -> Self {
+        #[cfg(windows)]
+        let global_packages_dir = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|p| p.join("npm").join("node_modules"))
+            .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public\npm\node_modules"));
+
+        #[cfg(not(windows))]
+        let global_packages_dir = PathBuf::from("/usr/local/lib/node_modules");
+
         Self {
             registry_url: Url::parse("https://registry.npmjs.org").unwrap(),
             cache_dir: PathBuf::from(".rpm/cache"),
-            global_packages_dir: PathBuf::from("/usr/local/lib/node_modules"),
+            global_packages_dir,
             timeout: 30,
             max_concurrent_downloads: 8,
             offline_mode: false,
