@@ -3,6 +3,7 @@ use log::info;
 
 use rpm::{
     cache::{CacheConfig, PackageCache},
+    config::Config,
     error::RpmResult,
     logging::{setup_logging, LoggingConfig},
     profiling::MemoryProfile,
@@ -10,11 +11,9 @@ use rpm::{
 };
 
 fn print_logo() {
-    // Teal-green body, orange eyes — matching the logo palette.
-    let g = "\x1b[36m";  // teal / seafoam green
-    let _o = "\x1b[33m";  // orange for the eyes
-    let b = "\x1b[1m";   // bold
-    let r = "\x1b[0m";   // reset
+    let g = "\x1b[36m";
+    let b = "\x1b[1m";
+    let r = "\x1b[0m";
 
     eprintln!();
     eprintln!();
@@ -24,12 +23,10 @@ fn print_logo() {
 
 #[tokio::main]
 async fn main() -> RpmResult<()> {
-    // Parse command line arguments
     let cli = Cli::parse();
 
     print_logo();
 
-    // Setup logging based on verbosity flag
     let logging_config = LoggingConfig {
         level: if cli.verbose {
             log::LevelFilter::Debug
@@ -42,10 +39,15 @@ async fn main() -> RpmResult<()> {
     };
     setup_logging(logging_config);
 
-    // Initialize memory profiling
-    let memory_profile = MemoryProfile::new(1024 * 1024 * 1024); // 1GB threshold
+    let project_dir = std::env::current_dir()?;
 
-    // Initialize package cache
+    // Load runtime config from rpm.json in the project directory (falls back to defaults).
+    let config = Config::load(&project_dir.join("rpm.json"))
+        .await
+        .unwrap_or_default();
+
+    let memory_profile = MemoryProfile::new(1024 * 1024 * 1024); // 1 GB threshold
+
     let cache_config = CacheConfig::default();
     let cache_dir = cache_config.cache_dir.clone();
     let package_cache = PackageCache::new(cache_config).await?;
@@ -53,17 +55,15 @@ async fn main() -> RpmResult<()> {
     info!("RPM package manager initialized");
     info!("Cache directory: {}", cache_dir.display());
 
-    // Create application context with shared resources
     let context = AppContext {
         memory_profile: memory_profile.clone(),
         package_cache: package_cache.clone(),
-        project_dir: std::env::current_dir()?,
+        project_dir,
+        config,
     };
 
-    // Execute CLI command with context
     cli.execute_with_context(context).await?;
 
-    // Log final memory usage statistics
     info!("Peak memory usage: {} bytes", memory_profile.peak_usage());
 
     Ok(())
