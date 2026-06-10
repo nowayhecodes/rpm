@@ -4,24 +4,37 @@ use std::path::Path;
 use tokio::fs;
 use anyhow::Result;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LockedDependency {
-    version: String,
-    resolved: String,
-    integrity: String,
-    requires: Option<HashMap<String, String>>,
+    pub version: String,
+    /// Tarball URL from the npm registry (`dist.tarball`).
+    pub resolved: String,
+    /// SHA-1 integrity hash (`dist.shasum`).
+    pub integrity: String,
+    pub requires: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LockFile {
-    name: String,
-    version: String,
-    lockfile_version: u32,
-    requires: bool,
-    dependencies: HashMap<String, LockedDependency>,
+    pub name: String,
+    pub version: String,
+    pub lockfile_version: u32,
+    pub requires: bool,
+    pub dependencies: HashMap<String, LockedDependency>,
 }
 
 impl LockFile {
+    /// Creates a new, empty lock file for the project identified by `name` and `version`.
+    pub fn new(name: String, version: String) -> Self {
+        Self {
+            name,
+            version,
+            lockfile_version: 1,
+            requires: true,
+            dependencies: HashMap::new(),
+        }
+    }
+
     pub async fn load(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path).await?;
         Ok(serde_json::from_str(&content)?)
@@ -52,4 +65,4 @@ impl LockFile {
     pub fn get_dependency(&self, name: &str) -> Option<&LockedDependency> {
         self.dependencies.get(name)
     }
-} 
+}
