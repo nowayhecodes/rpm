@@ -41,4 +41,26 @@ impl Sandbox {
 
         Ok(())
     }
-} 
+
+    /// Run a Node.js script directly using `node`, bypassing npm or shell invocation.
+    ///
+    /// `node_args` is everything after `"node "` in the postinstall script string.
+    /// For example, if the script is `"node scripts/postinstall.js"`, pass
+    /// `"scripts/postinstall.js"`. Only pure `node <path>` invocations are executed;
+    /// scripts that invoke external tools (husky, cmake, gyp, etc.) must be filtered
+    /// by the caller before reaching this method.
+    pub async fn run_node_script(&self, node_args: &str) -> Result<()> {
+        let args: Vec<&str> = node_args.split_whitespace().collect();
+        let status = Command::new("node")
+            .args(&args)
+            .current_dir(&self.working_dir)
+            .env("NODE_ENV", "production")
+            .status()?;
+
+        if !status.success() {
+            anyhow::bail!("Node script execution failed");
+        }
+
+        Ok(())
+    }
+}
