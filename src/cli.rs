@@ -1,8 +1,10 @@
 use crate::{
     cache::{CacheConfig, PackageCache},
+    config::Config,
     dependency::DependencyResolver,
     error::RpmResult,
     install::PackageInstaller,
+    lockfile::LockFile,
     package::PackageJson,
     profiling::MemoryProfile,
     registry::RegistryClient,
@@ -15,10 +17,10 @@ use semver::Version;
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
-use tokio::fs;
+use tokio::{fs, sync::Mutex};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -78,6 +80,7 @@ impl Cli {
             memory_profile,
             package_cache,
             project_dir,
+            config: Config::default(),
         })
         .await
     }
@@ -87,37 +90,113 @@ impl Cli {
             Commands::Init { ts, name } => {
                 Self::init_project(&context, name, ts).await?;
             }
+
             Commands::Install { packages, global } => {
-                let packages = if packages.is_empty() {
-                    let package_json = PackageJson::load_from(context.package_json_path()).await?;
-                    let mut all_packages = Vec::new();
-                    if let Some(deps) = package_json.dependencies {
-                        all_packages.extend(deps.into_keys());
+                let is_explicit = !packages.is_empty();
+
+                // Load root package.json for the lock-file header; fall back to a
+                // placeholder if the project has not been initialized yet.
+                let root_pkg =
+                    PackageJson::load_from(context.package_json_path())
+                        .await
+                        .unwrap_or_else(|_| PackageJson::new("project"));
+
+                let lock_file = Arc::new(Mutex::new(LockFile::new(
+                    root_pkg.name.clone(),
+                    root_pkg.version.clone(),
+                )));
+
+                // When called with no explicit packages, check for an existing lock
+                // file and replay it (exact pinned versions, no BFS resolution).
+                if !is_explicit {
+                    let lock_path = context.project_dir.join("rpm-lock.json");
+                    if lock_path.exists() {
+                        let existing = LockFile::load(&lock_path).await?;
+                        let locked: Vec<(String, String)> = existing
+                            .dependencies
+                            .into_iter()
+                            .map(|(name, dep)| (name, dep.version))
+                            .collect();
+
+                        let installer = PackageInstaller::new_in_project(
+                            global,
+                            context.package_cache.clone(),
+                            context.memory_profile.clone(),
+                            &context.project_dir,
+                            &context.config,
+                            Arc::clone(&lock_file),
+                        );
+                        installer.install_locked_packages(&locked).await?;
+                        info!("Installed {} packages from rpm-lock.json", locked.len());
+                        return Ok(());
                     }
-                    if let Some(dev_deps) = package_json.dev_dependencies {
-                        all_packages.extend(dev_deps.into_keys());
-                    }
-                    all_packages
+                }
+
+                // Resolve the package list: explicit args, or everything in
+                // package.json dependencies + devDependencies.
+                let packages_to_install: Vec<String> = if is_explicit {
+                    packages.clone()
                 } else {
-                    packages
+                    let mut all = Vec::new();
+                    if let Some(deps) = &root_pkg.dependencies {
+                        all.extend(deps.keys().cloned());
+                    }
+                    if let Some(dev_deps) = &root_pkg.dev_dependencies {
+                        all.extend(dev_deps.keys().cloned());
+                    }
+                    all
                 };
-                debug!("Installing packages: {:?}", packages);
+
+                debug!("Installing packages: {:?}", packages_to_install);
+
                 let installer = PackageInstaller::new_in_project(
                     global,
-                    context.package_cache,
-                    context.memory_profile,
-                    context.project_dir,
+                    context.package_cache.clone(),
+                    context.memory_profile.clone(),
+                    &context.project_dir,
+                    &context.config,
+                    Arc::clone(&lock_file),
                 );
-                installer.install_packages(&packages).await?;
-                info!("Successfully installed packages: {:?}", packages);
-            }
-            Commands::Update { packages } => {
-                let mut package_json = PackageJson::load_from(context.package_json_path()).await?;
-                let registry = Arc::new(RegistryClient::new());
-                let resolver = DependencyResolver::new(registry);
+                installer.install_packages(&packages_to_install).await?;
+                info!("Successfully installed packages: {:?}", packages_to_install);
 
-                // Strip leading range operators (^, ~, >=, etc.) to get a bare version
-                // for comparison. package.json stores ranges, not exact versions.
+                // When explicit packages were requested (not a bare `rpm install`),
+                // write them into package.json so the manifest stays in sync.
+                if is_explicit && !global {
+                    let lock = lock_file.lock().await;
+                    let pkg_json_path = context.package_json_path();
+                    let mut pkg_json =
+                        PackageJson::load_from(&pkg_json_path)
+                            .await
+                            .unwrap_or_else(|_| PackageJson::new(root_pkg.name.clone()));
+
+                    let deps = pkg_json.dependencies.get_or_insert_with(HashMap::new);
+                    for pkg_name in &packages {
+                        if let Some(locked_dep) = lock.get_dependency(pkg_name) {
+                            deps.insert(
+                                pkg_name.clone(),
+                                format!("^{}", locked_dep.version),
+                            );
+                        }
+                    }
+                    drop(lock);
+
+                    pkg_json.save_to(&pkg_json_path).await?;
+                    info!("Updated package.json with installed packages");
+                }
+            }
+
+            Commands::Update { packages } => {
+                let mut package_json =
+                    PackageJson::load_from(context.package_json_path()).await?;
+                let registry = Arc::new(RegistryClient::with_config(&context.config));
+                let resolver = DependencyResolver::new(Arc::clone(&registry));
+
+                let lock_file = Arc::new(Mutex::new(LockFile::new(
+                    package_json.name.clone(),
+                    package_json.version.clone(),
+                )));
+
                 let bare_version = |s: &str| -> Option<Version> {
                     let stripped = s.trim_start_matches(|c: char| {
                         matches!(c, '^' | '~' | '>' | '<' | '=' | ' ')
@@ -125,24 +204,19 @@ impl Cli {
                     Version::parse(stripped).ok()
                 };
 
-                // Snapshot the current deps so we can mutably borrow package_json later.
                 let deps_snapshot: Vec<(String, String)> = package_json
                     .dependencies
                     .as_ref()
                     .map(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .unwrap_or_default();
 
-                // Collect (name, new_version) pairs for all packages that need updating.
                 let mut version_updates: Vec<(String, String)> = Vec::new();
 
                 let targets: Vec<(String, String)> = if !packages.is_empty() {
                     packages
                         .iter()
                         .filter_map(|p| {
-                            deps_snapshot
-                                .iter()
-                                .find(|(name, _)| name == p)
-                                .cloned()
+                            deps_snapshot.iter().find(|(name, _)| name == p).cloned()
                         })
                         .collect()
                 } else {
@@ -171,6 +245,8 @@ impl Cli {
                             context.package_cache.clone(),
                             context.memory_profile.clone(),
                             context.project_dir.clone(),
+                            &context.config,
+                            Arc::clone(&lock_file),
                         );
                         installer.install_packages(&[package.clone()]).await?;
                         println!("Updated {} to version {}", package, latest.version);
@@ -180,7 +256,6 @@ impl Cli {
                     }
                 }
 
-                // Persist updated versions to package.json.
                 if !version_updates.is_empty() {
                     if let Some(deps) = &mut package_json.dependencies {
                         for (name, new_version) in &version_updates {
@@ -190,9 +265,10 @@ impl Cli {
                     package_json.save_to(context.package_json_path()).await?;
                 }
             }
+
             Commands::Remove { packages, global } => {
                 let base_path = if global {
-                    PathBuf::from("/usr/local/lib/node_modules")
+                    context.config.global_packages_dir.clone()
                 } else {
                     context.node_modules_path()
                 };
@@ -217,11 +293,12 @@ impl Cli {
                     }
                 }
             }
+
             Commands::List { global } => {
                 println!("Installed packages:");
 
-                // Read package.json for local packages
-                if let Ok(package_json) = PackageJson::load_from(context.package_json_path()).await
+                if let Ok(package_json) =
+                    PackageJson::load_from(context.package_json_path()).await
                 {
                     println!("\nLocal packages:");
                     if let Some(deps) = &package_json.dependencies {
@@ -238,24 +315,25 @@ impl Cli {
                     }
                 }
 
-                // List global packages
-                let global_dir = PathBuf::from("/usr/local/lib/node_modules");
+                let global_dir = &context.config.global_packages_dir;
                 if global && global_dir.exists() {
                     println!("\nGlobal packages:");
                     let mut entries = fs::read_dir(global_dir).await?;
                     while let Some(entry) = entries.next_entry().await? {
                         if entry.file_type().await?.is_dir() {
                             if let Some(name) = entry.file_name().to_str() {
-                                if let Ok(package_json) =
-                                    PackageJson::load_from(entry.path().join("package.json")).await
+                                if let Ok(pkg_json) =
+                                    PackageJson::load_from(entry.path().join("package.json"))
+                                        .await
                                 {
-                                    println!("  {} @ {}", name, package_json.version);
+                                    println!("  {} @ {}", name, pkg_json.version);
                                 }
                             }
                         }
                     }
                 }
             }
+
             Commands::Audit { fix } => {
                 println!("Auditing packages for security vulnerabilities...");
 
@@ -264,7 +342,6 @@ impl Cli {
                 let mut security_checker = SecurityChecker::new();
                 let mut vulnerabilities_found = false;
 
-                // Snapshot deps so we can mutably borrow package_json after the loop.
                 let deps_snapshot: Vec<(String, String)> = package_json
                     .dependencies
                     .as_ref()
@@ -293,11 +370,8 @@ impl Cli {
                         }
                     }
 
-                    // When --fix is requested, always upgrade each dependency to its
-                    // latest published version. This is the most reliable way to apply
-                    // security patches even when the advisory API is unavailable.
                     if fix {
-                        let registry = Arc::new(RegistryClient::new());
+                        let registry = Arc::new(RegistryClient::with_config(&context.config));
                         let package_info = registry.fetch_package_info(name, None).await?;
                         let latest_version = package_info.version.to_string();
                         if &latest_version != version_str {
@@ -306,7 +380,6 @@ impl Cli {
                     }
                 }
 
-                // Persist fixes to package.json.
                 if fix && !updates.is_empty() {
                     if let Some(deps) = &mut package_json.dependencies {
                         for (name, new_version) in &updates {
