@@ -15,6 +15,12 @@ pub struct VersionManager {
     resolved_versions: HashMap<String, Version>,
 }
 
+impl Default for VersionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VersionManager {
     pub fn new() -> Self {
         Self {
