@@ -2,13 +2,17 @@ use anyhow::Result;
 use rpm::{
     cache::{CacheConfig, PackageCache},
     cli::Cli,
+    config::Config,
     install::PackageInstaller,
+    lockfile::LockFile,
     package::PackageJson,
     profiling::MemoryProfile,
     AppContext,
 };
+use std::sync::Arc;
 use tempfile::tempdir;
 use tokio;
+use tokio::sync::Mutex;
 
 async fn setup_test_environment() -> Result<(tempfile::TempDir, AppContext)> {
     let temp_dir = tempdir()?;
@@ -22,6 +26,7 @@ async fn setup_test_environment() -> Result<(tempfile::TempDir, AppContext)> {
         MemoryProfile::new(1024 * 1024 * 1024),
         package_cache,
         temp_dir.path().to_path_buf(),
+        Config::default(),
     );
     Ok((temp_dir, context))
 }
@@ -93,11 +98,17 @@ async fn test_init_command_with_typescript_creates_ts_project() -> Result<()> {
 async fn test_local_install_creates_node_modules_in_project_directory() -> Result<()> {
     let (temp_dir, context) = setup_test_environment().await?;
 
+    let lock_file = Arc::new(Mutex::new(LockFile::new(
+        "test".to_string(),
+        "0.0.0".to_string(),
+    )));
     let installer = PackageInstaller::new_in_project(
         false,
         context.package_cache,
         context.memory_profile,
         context.project_dir,
+        &context.config,
+        lock_file,
     );
     installer.install_packages(&[]).await?;
 
