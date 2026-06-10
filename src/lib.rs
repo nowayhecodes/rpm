@@ -17,6 +17,7 @@ pub mod verification;
 pub mod version;
 
 use cache::PackageCache;
+use config::Config;
 use profiling::MemoryProfile;
 use std::path::{Path, PathBuf};
 
@@ -29,6 +30,7 @@ pub struct AppContext {
     pub memory_profile: MemoryProfile,
     pub package_cache: PackageCache,
     pub project_dir: PathBuf,
+    pub config: Config,
 }
 
 impl AppContext {
@@ -36,11 +38,13 @@ impl AppContext {
         memory_profile: MemoryProfile,
         package_cache: PackageCache,
         project_dir: PathBuf,
+        config: Config,
     ) -> Self {
         Self {
             memory_profile,
             package_cache,
             project_dir,
+            config,
         }
     }
 
